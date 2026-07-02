@@ -4,13 +4,16 @@
 Requires: pip install hatchling wheel
 
 This script:
-1. Syncs the version from package.json into pyproject.toml
+1. Resolves the version to publish, preferring HEY_API_SNAPSHOT_VERSION
+   (set by CI for snapshot builds) and falling back to package.json for
+   stable releases, then patches pyproject.toml with it
 2. For each platform binary in build/, builds a wheel with hatchling
 3. Re-tags the wheel with the correct platform tag using `wheel tags`
    (this updates both the filename AND internal WHEEL metadata)
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,13 +29,22 @@ PLATFORM_MAP = {
 
 
 def sync_version() -> str:
-    """Read version from package.json and patch pyproject.toml."""
-    pkg_json = Path(__file__).parent.parent / "package.json"
+    """Resolve the version to publish and patch pyproject.toml with it.
+
+    HEY_API_SNAPSHOT_VERSION (set by the snapshot-pypi CI job) takes
+    precedence so snapshot builds get a unique, PEP 440-compliant dev
+    version instead of the raw package.json version — otherwise every
+    snapshot on the same day would collide and skip-existing would
+    silently no-op after the first publish. Stable releases (publish-pypi)
+    never set this env var, so they fall through to package.json unchanged.
+    """
+    version = os.environ.get("HEY_API_SNAPSHOT_VERSION")
+    if not version:
+        pkg_json = Path(__file__).parent.parent / "package.json"
+        with open(pkg_json) as f:
+            version = json.load(f)["version"]
+
     pyproject = Path(__file__).parent / "pyproject.toml"
-
-    with open(pkg_json) as f:
-        version = json.load(f)["version"]
-
     content = pyproject.read_text()
     content = re.sub(
         r'^version\s*=\s*".*"',
@@ -101,7 +113,7 @@ def main() -> None:
     for binary_name, platform_tag in PLATFORM_MAP.items():
         binary_path = build_dir / binary_name
         if not binary_path.exists():
-            print(f"  skip  {binary_name} (not found)")
+            print(f"  skip  {binary_name} (not found)", file=sys.stderr)
             continue
         print(f"  build {platform_tag}")
         build_wheel(binary_path, platform_tag, dist_dir)
@@ -112,6 +124,13 @@ def main() -> None:
     for whl in sorted(wheels):
         size_mb = whl.stat().st_size / (1024 * 1024)
         print(f"    {whl.name}  ({size_mb:.1f} MB)")
+
+    if built < len(PLATFORM_MAP):
+        print(
+            f"\n  warning: only {built}/{len(PLATFORM_MAP)} platform "
+            "binaries found — check the build step output above",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
